@@ -1,0 +1,312 @@
+name: Release
+
+# 由 ci.yml 的 auto-tag job 推送 tag 后自动触发
+# Triggered automatically after ci.yml's auto-tag job pushes a tag
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── 多平台编译 / Multi-platform build ─────────────────────────────────────
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            platform: linux-aarch64
+
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            platform: darwin-x86_64
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: darwin-aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install aarch64 Linux cross-compilation toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install macOS system dependencies
+        if: startsWith(matrix.os, 'macos')
+        run: brew install pkg-config
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # 从 Cargo.toml 读取 [[bin]].name（构建产物的实际文件名）
+      # Read [[bin]].name from Cargo.toml (actual filename of the build artifact)
+      #
+      # [[bin]].name 紧跟在 "[[bin]]" 行之后，通过 awk 精确提取，
+      # 避免误读 [package].name。
+      # [[bin]].name appears right after the "[[bin]]" line; use awk to extract it
+      # precisely, avoiding accidentally reading [package].name.
+      - name: Read bin name
+        id: cargo
+        shell: bash
+        run: |
+          BIN_NAME=$(awk '/^\[\[bin\]\]/{found=1} found && /^name/{gsub(/.*= *"|".*/, ""); print; exit}' Cargo.toml)
+          echo "bin=$BIN_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      # ── 提取版本号 / Extract version ────────────────────────────────────────
+      - name: Get version
+        id: meta
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # ── 重命名产物并计算 sha256 / Rename artifact and compute sha256 ────────
+      - name: Prepare artifact (Windows)
+        if: runner.os == 'Windows'
+        id: prep_win
+        shell: pwsh
+        run: |
+          $bin  = "${{ steps.cargo.outputs.bin }}"
+          $ver  = "${{ steps.meta.outputs.version }}"
+          $src  = "target/${{ matrix.target }}/release/${bin}.exe"
+          $name = "${bin}-${{ matrix.platform }}-${ver}.exe"
+          Copy-Item $src $name
+          $hash = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name" | Set-Content "$name.sha256"
+          "artifact=$name" >> $env:GITHUB_OUTPUT
+          "sha256=$hash"   >> $env:GITHUB_OUTPUT
+
+      - name: Prepare artifact (Linux / macOS)
+        if: runner.os != 'Windows'
+        id: prep_unix
+        shell: bash
+        run: |
+          BIN="${{ steps.cargo.outputs.bin }}"
+          VER="${{ steps.meta.outputs.version }}"
+          SRC="target/${{ matrix.target }}/release/${BIN}"
+          NAME="${BIN}-${{ matrix.platform }}-${VER}"
+          cp "$SRC" "$NAME"
+          if command -v sha256sum > /dev/null 2>&1; then
+            HASH=$(sha256sum "$NAME" | awk '{print $1}')
+          else
+            HASH=$(shasum -a 256 "$NAME" | awk '{print $1}')
+          fi
+          echo "$HASH  $NAME" > "$NAME.sha256"
+          echo "artifact=$NAME" >> "$GITHUB_OUTPUT"
+          echo "sha256=$HASH"   >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.cargo.outputs.bin }}-${{ matrix.platform }}-${{ steps.meta.outputs.version }}
+          path: |
+            ${{ steps.prep_win.outputs.artifact || steps.prep_unix.outputs.artifact }}
+            ${{ steps.prep_win.outputs.artifact || steps.prep_unix.outputs.artifact }}.sha256
+
+  # ── 生成 registry.json、创建 Release / Generate registry.json & Create Release
+  #
+  # 所有字段的来源：
+  # - id            ← Cargo.toml [[bin]].name
+  # - name          ← id 转 Title Case（下划线替换为空格，每词首字母大写）
+  # - author        ← github.repository 的 owner 部分
+  # - latestVersion ← Cargo.toml version（即 tag 去掉 "v" 前缀）
+  # - description   ← registry.json 中由维护者填写的字段（保持不变）
+  # - tags          ← registry.json 中由维护者填写的字段（保持不变）
+  # - license       ← registry.json 中由维护者填写的字段（保持不变）
+  # - downloads     ← 由本 job 根据 tag 和平台名称构造
+  # - sha256        ← 从 build job 上传的 .sha256 文件读取
+  #
+  # Field sources:
+  # - id            ← Cargo.toml [[bin]].name
+  # - name          ← id converted to Title Case (underscores → spaces, each word capitalized)
+  # - author        ← owner part of github.repository
+  # - latestVersion ← Cargo.toml version (tag with "v" stripped)
+  # - description   ← maintained by the module author in registry.json (preserved)
+  # - tags          ← maintained by the module author in registry.json (preserved)
+  # - license       ← maintained by the module author in registry.json (preserved)
+  # - downloads     ← constructed by this job from tag and platform names
+  # - sha256        ← read from .sha256 files uploaded by the build job
+  release:
+    name: Generate registry.json & Create Release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          token: ${{ secrets.RELEASE_PAT }}
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      # 从 Cargo.toml 读取 [[bin]].name 和 version
+      # Read [[bin]].name and version from Cargo.toml
+      - name: Read Cargo.toml metadata
+        id: cargo
+        run: |
+          BIN_NAME=$(awk '/^\[\[bin\]\]/{found=1} found && /^name/{gsub(/.*= *"|".*/, ""); print; exit}' Cargo.toml)
+          VER=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "bin=$BIN_NAME"  >> "$GITHUB_OUTPUT"
+          echo "version=$VER"   >> "$GITHUB_OUTPUT"
+
+      # id 就是 [[bin]].name；name 是 id 的 Title Case 形式
+      # id is [[bin]].name; name is the Title Case form of id
+      - name: Derive display name and author
+        id: derived
+        env:
+          MOD_ID: ${{ steps.cargo.outputs.bin }}
+          REPO:   ${{ github.repository }}
+        run: |
+          DISPLAY=$(echo "$MOD_ID" | tr '_' ' ' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2); print}')
+          AUTHOR=$(echo "$REPO" | cut -d'/' -f1)
+          echo "display_name=$DISPLAY" >> "$GITHUB_OUTPUT"
+          echo "author=$AUTHOR"        >> "$GITHUB_OUTPUT"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ steps.cargo.outputs.bin }}-*
+          path: artifacts/
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts/ -type f | sort
+
+      # 从 sha256 文件读取各平台摘要 / Read per-platform sha256 from .sha256 files
+      - name: Read sha256 values
+        id: sha
+        run: |
+          read_sha() {
+            local platform="$1"
+            local f
+            f=$(find artifacts/ -name "*-${platform}*.sha256" | head -1)
+            [[ -n "$f" ]] && awk '{print $1}' "$f" || echo ""
+          }
+          echo "win=$(read_sha windows-x86_64)"  >> "$GITHUB_OUTPUT"
+          echo "lnx=$(read_sha linux-x86_64)"    >> "$GITHUB_OUTPUT"
+          echo "arm=$(read_sha linux-aarch64)"   >> "$GITHUB_OUTPUT"
+          echo "mac=$(read_sha darwin-x86_64)"   >> "$GITHUB_OUTPUT"
+          echo "mac_arm=$(read_sha darwin-aarch64)" >> "$GITHUB_OUTPUT"
+
+      # 重写 registry.json：保留 description/tags/license，其余全部由本步骤生成
+      # Rewrite registry.json: preserve description/tags/license, generate everything else
+      - name: Update registry.json
+        env:
+          MOD_ID:   ${{ steps.cargo.outputs.bin }}
+          MOD_NAME: ${{ steps.derived.outputs.display_name }}
+          AUTHOR:   ${{ steps.derived.outputs.author }}
+          VERSION:  ${{ steps.cargo.outputs.version }}
+          REPO:     ${{ github.repository }}
+          TAG:      ${{ github.ref_name }}
+          SHA_WIN:  ${{ steps.sha.outputs.win }}
+          SHA_LNX:  ${{ steps.sha.outputs.lnx }}
+          SHA_ARM:  ${{ steps.sha.outputs.arm }}
+          SHA_MAC:  ${{ steps.sha.outputs.mac }}
+          SHA_MAC_ARM: ${{ steps.sha.outputs.mac_arm }}
+        run: |
+          BASE="https://github.com/${REPO}/releases/download/${TAG}"
+          WIN_FILE="${MOD_ID}-windows-x86_64-${VERSION}.exe"
+          LNX_FILE="${MOD_ID}-linux-x86_64-${VERSION}"
+          ARM_FILE="${MOD_ID}-linux-aarch64-${VERSION}"
+          MAC_FILE="${MOD_ID}-darwin-x86_64-${VERSION}"
+          MAC_ARM_FILE="${MOD_ID}-darwin-aarch64-${VERSION}"
+
+          DESC=$(jq -r '.description // ""' registry.json)
+          TAGS=$(jq    '.tags        // []' registry.json)
+          LICENSE=$(jq -r '.license  // ""' registry.json)
+
+          jq -n \
+            --arg  id          "$MOD_ID" \
+            --arg  name        "$MOD_NAME" \
+            --arg  desc        "$DESC" \
+            --arg  author      "$AUTHOR" \
+            --argjson tags     "$TAGS" \
+            --arg  license     "$LICENSE" \
+            --arg  ver         "$VERSION" \
+            --arg  win_url     "${BASE}/${WIN_FILE}" \
+            --arg  lnx_url     "${BASE}/${LNX_FILE}" \
+            --arg  arm_url     "${BASE}/${ARM_FILE}" \
+            --arg  mac_url     "${BASE}/${MAC_FILE}" \
+            --arg  mac_arm_url "${BASE}/${MAC_ARM_FILE}" \
+            --arg  s_win       "$SHA_WIN" \
+            --arg  s_lnx       "$SHA_LNX" \
+            --arg  s_arm       "$SHA_ARM" \
+            --arg  s_mac       "$SHA_MAC" \
+            --arg  s_mac_arm   "$SHA_MAC_ARM" \
+            '{
+              id:            $id,
+              name:          $name,
+              description:   $desc,
+              author:        $author,
+              tags:          $tags,
+              license:       $license,
+              latestVersion: $ver,
+              downloads: {
+                "windows-x86_64": $win_url,
+                "linux-x86_64":   $lnx_url,
+                "linux-aarch64":  $arm_url,
+                "darwin-x86_64":  $mac_url,
+                "darwin-aarch64": $mac_arm_url
+              },
+              sha256: {
+                "windows-x86_64": $s_win,
+                "linux-x86_64":   $s_lnx,
+                "linux-aarch64":  $s_arm,
+                "darwin-x86_64":  $s_mac,
+                "darwin-aarch64": $s_mac_arm
+              }
+            }' > _tmp.json && mv _tmp.json registry.json
+
+          echo "=== Generated registry.json ==="
+          cat registry.json
+
+      - name: Commit registry.json
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add registry.json
+          git diff --cached --quiet \
+            && echo "registry.json unchanged, skipping commit" \
+            || git commit -m "chore: update registry.json for ${{ github.ref_name }}"
+          git push origin master
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: artifacts/**/*

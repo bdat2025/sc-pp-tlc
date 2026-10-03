@@ -1,0 +1,116 @@
+name: CI
+
+# push 到 master 分支或向 master 开 PR 时触发
+# Triggered on pushes to master and PRs targeting master
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - "**.md"
+      - "registry.json"   # registry.json 由 release workflow 维护，CI 忽略其变更
+  pull_request:
+    branches: [master]
+    paths-ignore:
+      - "**.md"
+      - "registry.json"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── 三平台代码检查 / Cross-platform check ─────────────────────────────────
+  check:
+    name: Check & Lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: cargo check
+        run: cargo check
+
+      - name: cargo clippy
+        run: cargo clippy -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+  # ── 自动推 tag / Auto-tag ──────────────────────────────────────────────────
+  #
+  # 仅在 push 到 master 且三平台检查全部通过后运行。
+  # 从 Cargo.toml 读取版本号，若对应 tag 尚不存在则创建并推送，
+  # 从而自动触发 release.yml 工作流。
+  #
+  # 注意：需要先生成一个 Personal Access Token 并配置为仓库 secret：
+  # GitHub 头像 → Settings → Developer settings → Personal access tokens → Tokens (classic)
+  # → Generate new token (classic)，勾选 repo 权限后生成，复制 token（ghp_xxx...，只显示一次）；
+  # 再到本仓库 Settings → Secrets → Actions → New repository secret，
+  # Name 填 RELEASE_PAT，Secret 粘贴 token，点 Add secret。
+  # 使用默认 GITHUB_TOKEN 推送的 tag 不会触发其他 workflow（GitHub 的安全限制）。
+  #
+  # Only runs on push to master after all three platform checks pass.
+  # Reads the version from Cargo.toml; if the corresponding tag doesn't exist yet,
+  # creates and pushes it, which in turn triggers the release.yml workflow.
+  #
+  # Note: generate a Personal Access Token and add it as a repository secret first:
+  # GitHub avatar → Settings → Developer settings → Personal access tokens → Tokens (classic)
+  # → Generate new token (classic), check repo scope, generate and copy the token (ghp_xxx...,
+  # shown only once); then go to this repo's Settings → Secrets → Actions → New repository secret,
+  # set Name to RELEASE_PAT and paste the token into Secret, click Add secret.
+  # Tags pushed with the default GITHUB_TOKEN do not trigger other workflows (GitHub security restriction).
+  auto-tag:
+    name: Auto-tag release
+    runs-on: ubuntu-22.04
+    # needs 所有三个平台的 check 都通过 / needs all three platform checks to pass
+    needs: check
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT }}
+
+      # 从 Cargo.toml 读取版本号 / Read version from Cargo.toml
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}"  >> "$GITHUB_OUTPUT"
+
+      # 若 tag 已存在则跳过，避免重复发布 / Skip if tag already exists
+      - name: Check if tag exists
+        id: tag_check
+        run: |
+          if git ls-remote --tags origin "${{ steps.version.outputs.tag }}" | grep -q .; then
+            echo "exists=true"  >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.version.outputs.tag }} already exists, skipping."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 用 PAT 推送 tag，使下游 release.yml 能被触发
+      # Push tag with PAT so the downstream release.yml can be triggered
+      - name: Create and push tag
+        if: steps.tag_check.outputs.exists == 'false'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"

@@ -1,0 +1,5 @@
+{
+  "description": "Upload processed recordings to TeleCloud",
+  "tags": ["upload", "telecloud"],
+  "license": "MIT"
+}

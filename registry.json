@@ -1,5 +1,26 @@
 {
+  "id": "telecloud_upload",
+  "name": "Telecloud Upload",
   "description": "Upload processed recordings to TeleCloud",
-  "tags": ["upload", "telecloud"],
-  "license": "MIT"
+  "author": "bdat2025",
+  "tags": [
+    "upload",
+    "telecloud"
+  ],
+  "license": "MIT",
+  "latestVersion": "0.1.3",
+  "downloads": {
+    "windows-x86_64": "https://github.com/bdat2025/sc-pp-tlc/releases/download/v0.1.3/telecloud_upload-windows-x86_64-0.1.3.exe",
+    "linux-x86_64": "https://github.com/bdat2025/sc-pp-tlc/releases/download/v0.1.3/telecloud_upload-linux-x86_64-0.1.3",
+    "linux-aarch64": "https://github.com/bdat2025/sc-pp-tlc/releases/download/v0.1.3/telecloud_upload-linux-aarch64-0.1.3",
+    "darwin-x86_64": "https://github.com/bdat2025/sc-pp-tlc/releases/download/v0.1.3/telecloud_upload-darwin-x86_64-0.1.3",
+    "darwin-aarch64": "https://github.com/bdat2025/sc-pp-tlc/releases/download/v0.1.3/telecloud_upload-darwin-aarch64-0.1.3"
+  },
+  "sha256": {
+    "windows-x86_64": "3315c3e7806171dd561962a1f9748314740e934c1e8d1013a03e5243eb0edc71",
+    "linux-x86_64": "ee7c2e48e878d2610302cb7ea964e13e7015580ca598762b75501cb78e80f3ce",
+    "linux-aarch64": "b4380e2f5e424ca5a0154c98bfca9ebb69e559c41e873991b931671bb14ecd16",
+    "darwin-x86_64": "fbd903cd143b52b1b2be7fdeb5ae56ac4a947c42c69081a2efa33db6ffc52c33",
+    "darwin-aarch64": "3cd9a63b800396ae75c5a0c85e0c1b998026e263eaca96a1f2193b2e658bfb2c"
+  }
 }

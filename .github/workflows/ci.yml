@@ -28,7 +28,57 @@ jobs:
         os: [ubuntu-22.04, windows-latest, macos-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      # ── Checkout module ────────────────────────────────────────────────────
+      - name: Checkout module
+        uses: actions/checkout@v4
+
+      # ── Checkout pp_utils from StripchatRecorder beta ─────────────────────
+      # pp_utils is not a standalone repository.
+      # It lives inside:
+      # ChanTrail/StripchatRecorder/modules/pp_utils
+      #
+      # Cargo.toml of this module uses:
+      # pp_utils = { path = "../pp_utils" }
+      #
+      # Therefore we prepare:
+      # $GITHUB_WORKSPACE/../pp_utils
+
+      - name: Checkout StripchatRecorder pp_utils
+        uses: actions/checkout@v4
+        with:
+          repository: ChanTrail/StripchatRecorder
+          ref: beta
+          path: pp_utils_source
+          sparse-checkout: |
+            modules/pp_utils
+
+      - name: Prepare pp_utils
+        shell: bash
+        run: |
+          set -e
+
+          echo "=== Preparing pp_utils ==="
+
+          rm -rf ../pp_utils
+
+          if [ ! -d "pp_utils_source/modules/pp_utils" ]; then
+            echo "ERROR: modules/pp_utils was not found in ChanTrail/StripchatRecorder@beta"
+            exit 1
+          fi
+
+          mv pp_utils_source/modules/pp_utils ../pp_utils
+          rm -rf pp_utils_source
+
+          echo "=== pp_utils location ==="
+          pwd
+          echo "Expected: $(cd .. && pwd)/pp_utils"
+
+          echo "=== pp_utils files ==="
+          ls -la ../pp_utils
+
+          echo "=== pp_utils Cargo.toml ==="
+          test -f ../pp_utils/Cargo.toml
+          sed -n '1,120p' ../pp_utils/Cargo.toml
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -40,6 +90,20 @@ jobs:
         with:
           key: ${{ matrix.os }}
 
+      - name: Verify Cargo dependency layout
+        shell: bash
+        run: |
+          echo "=== Current directory ==="
+          pwd
+
+          echo "=== Module Cargo.toml pp_utils reference ==="
+          grep -n "pp_utils" Cargo.toml || true
+
+          echo "=== ../pp_utils ==="
+          test -f ../pp_utils/Cargo.toml
+
+          echo "pp_utils dependency path is available."
+
       - name: cargo check
         run: cargo check
 
@@ -48,6 +112,7 @@ jobs:
 
       - name: cargo test
         run: cargo test
+
 
   # ── 自动推 tag / Auto-tag ──────────────────────────────────────────────────
   #
@@ -72,11 +137,14 @@ jobs:
   # shown only once); then go to this repo's Settings → Secrets → Actions → New repository secret,
   # set Name to RELEASE_PAT and paste the token into Secret, click Add secret.
   # Tags pushed with the default GITHUB_TOKEN do not trigger other workflows (GitHub security restriction).
+
   auto-tag:
     name: Auto-tag release
     runs-on: ubuntu-22.04
+
     # needs 所有三个平台的 check 都通过 / needs all three platform checks to pass
     needs: check
+
     if: github.ref == 'refs/heads/master' && github.event_name == 'push'
 
     steps:
@@ -103,6 +171,7 @@ jobs:
             echo "Tag ${{ steps.version.outputs.tag }} already exists, skipping."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.version.outputs.tag }} does not exist."
           fi
 
       # 用 PAT 推送 tag，使下游 release.yml 能被触发
